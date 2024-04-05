@@ -18,6 +18,7 @@ package zio.jdbc
 import zio._
 
 import java.io._
+import java.time.{OffsetDateTime, OffsetTime}
 import java.sql.{ Array => _, _ }
 import scala.collection.immutable.ListMap
 
@@ -747,16 +748,14 @@ trait JdbcDecoderLowPriorityImplicits {
               DynamicValue.Primitive(timestamp.toInstant(), StandardType.InstantType)
 
             case SqlTypes.TIMESTAMP_WITH_TIMEZONE =>
-              // TODO: Timezone
-              val timestamp = resultSet.getTimestamp(columnIndex)
+              val timestamp = resultSet.getObject(columnIndex, classOf[OffsetDateTime])
 
-              DynamicValue.Primitive(timestamp.toInstant(), StandardType.InstantType)
+              DynamicValue.Primitive(timestamp, StandardType.OffsetDateTimeType)
 
             case SqlTypes.TIME_WITH_TIMEZONE =>
-              // TODO: Timezone
-              val time = resultSet.getTime(columnIndex)
+              val time = resultSet.getObject(columnIndex, classOf[OffsetTime])
 
-              DynamicValue.Primitive(time.toLocalTime(), StandardType.LocalTimeType)
+              DynamicValue.Primitive(time, StandardType.OffsetTimeType)
 
             case SqlTypes.TINYINT =>
               val short = resultSet.getShort(columnIndex)
