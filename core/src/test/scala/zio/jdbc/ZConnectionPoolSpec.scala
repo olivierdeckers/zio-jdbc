@@ -7,8 +7,8 @@ import zio.test.Assertion._
 import zio.test.TestAspect._
 import zio.test._
 
-import scala.util.Random
 import java.sql.Connection
+import scala.util.Random
 
 object ZConnectionPoolSpec extends ZIOSpecDefault {
   final case class Person(name: String, age: Int)
@@ -301,13 +301,39 @@ object ZConnectionPoolSpec extends ZIOSpecDefault {
                   testResult <- asserttions
                 } yield testResult
               } +
+              test("select all multiple in") {
+                val names1        = Vector(sherlockHolmes.name, johnWatson.name)
+                val names2        = Chunk(johnDoe.name)
+                val namesToSearch = Chunk.fromIterable(names1) ++ names2
+
+                for {
+                  _     <- createUsers *> insertSherlock *> insertWatson *> insertJohn
+                  users <- transaction {
+                             sql"select name, age from users where name IN ($names1) OR name in ($names2)"
+                               .query[User]
+                               .selectAll
+                           }
+                } yield assertTrue(users.map(_.name) == namesToSearch)
+              } +
+              test("select all in empty") {
+                val empty = Chunk.empty[String]
+
+                for {
+                  _     <- createUsers *> insertSherlock
+                  users <- transaction {
+                             sql"select name, age from users where name IN ($empty)"
+                               .query[User]
+                               .selectAll
+                           }
+                } yield assertTrue(users.isEmpty)
+              } +
               test("select stream") {
                 for {
-                  _     <- createUsers *> insertSherlock *> insertWatson
+                  _     <- createUsersNoId *> insertFive
                   value <- transaction {
-                             sql"select name, age from users".query[User].selectStream.runCollect
+                             sql"select name, age from users_no_id".query[UserNoId].selectStream(2).chunks.runCollect
                            }
-                } yield assertTrue(value == Chunk(sherlockHolmes, johnWatson))
+                } yield assertTrue(value == Chunk(Chunk(user1, user2), Chunk(user3, user4), Chunk(user5)))
               } +
               test("delete") {
                 for {

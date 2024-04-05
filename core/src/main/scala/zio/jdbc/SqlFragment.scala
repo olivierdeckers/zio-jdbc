@@ -18,7 +18,7 @@ package zio.jdbc
 import zio._
 import zio.jdbc.SqlFragment.Segment
 
-import java.sql.{ PreparedStatement, Types }
+import java.sql.{ PreparedStatement, SQLException, SQLTimeoutException, Types }
 import java.time.{ OffsetDateTime, ZoneOffset }
 import scala.language.implicitConversions
 
@@ -113,27 +113,28 @@ sealed trait SqlFragment { self =>
     foreachSegment { syntax =>
       sql.append(syntax.value)
     } { param =>
+      var size = 0
       param.value match {
         case iterable: Iterable[_] =>
-          iterable.iterator.foreach { item =>
+          iterable.foreach { item =>
             paramsBuilder += item.toString
+            size += 1
           }
-          sql.append(
-            Seq.fill(iterable.iterator.size)("?").mkString(",")
-          )
 
         case array: Array[_] =>
           array.foreach { item =>
             paramsBuilder += item.toString
+            size += 1
           }
-          sql.append(
-            Seq.fill(array.length)("?").mkString(",")
-          )
 
         case _ =>
-          sql.append("?")
           paramsBuilder += param.value.toString
+          size += 1
       }
+      sql.append(
+        if (size == 1) "?"
+        else Seq.fill(size)("?").mkString(",")
+      )
     }
 
     val params       = paramsBuilder.result()
@@ -171,18 +172,22 @@ sealed trait SqlFragment { self =>
   /**
    * Executes a SQL statement, such as one that creates a table.
    */
-  def execute: ZIO[ZConnection, Throwable, Unit] =
-    ZIO.scoped(for {
-      connection <- ZIO.service[ZConnection]
-      _          <- connection.executeSqlWith(self, false) { ps =>
-                      ZIO.attempt(ps.executeUpdate())
-                    }
-    } yield ())
+  def execute: ZIO[ZConnection, QueryException, Unit] =
+    ZIO
+      .scoped(for {
+        connection <- ZIO.service[ZConnection]
+        _          <- connection.executeSqlWith(self, false) { ps =>
+                        ZIO.attempt(ps.executeUpdate()).refineOrDie {
+                          case e: SQLTimeoutException => ZSQLTimeoutException(e)
+                          case e: SQLException        => ZSQLException(e)
+                        }
+                      }
+      } yield ())
 
   /**
    * Executes a SQL delete query.
    */
-  def delete: ZIO[ZConnection, Throwable, Long] =
+  def delete: ZIO[ZConnection, QueryException, Long] =
     ZIO.scoped(executeLargeUpdate(self))
 
   /**
@@ -211,63 +216,72 @@ sealed trait SqlFragment { self =>
    * parsed and returned as `Chunk[Long]`. If keys are non-numeric, a
    * `Chunk.empty` is returned.
    */
-  def insertWithKeys: ZIO[ZConnection, Throwable, UpdateResult[Long]] =
+  def insertWithKeys: ZIO[ZConnection, QueryException, UpdateResult[Long]] =
     ZIO.scoped(executeWithReturning(self, JdbcDecoder[Long]))
 
   /**
    * Executes a SQL update query with a RETURNING clause, materialized
    * as values of type `A`.
    */
-  def updateReturning[A: JdbcDecoder]: ZIO[ZConnection, Throwable, UpdateResult[A]] =
+  def updateReturning[A: JdbcDecoder]: ZIO[ZConnection, QueryException, UpdateResult[A]] =
     ZIO.scoped(executeWithReturning(self, JdbcDecoder[A]))
 
   /**
    * Performs a SQL update query, returning a count of rows updated.
    */
-  def update: ZIO[ZConnection, Throwable, Long] =
+  def update: ZIO[ZConnection, QueryException, Long] =
     ZIO.scoped(executeLargeUpdate(self))
 
-  private def executeLargeUpdate(sql: SqlFragment): ZIO[Scope with ZConnection, Throwable, Long] = for {
+  private def executeLargeUpdate(sql: SqlFragment): ZIO[Scope with ZConnection, QueryException, Long] = for {
     connection <- ZIO.service[ZConnection]
     count      <- connection.executeSqlWith(sql, false) { ps =>
-                    ZIO.attempt(ps.executeLargeUpdate())
+                    ZIO.attempt(ps.executeLargeUpdate()).refineOrDie {
+                      case e: SQLTimeoutException => ZSQLTimeoutException(e)
+                      case e: SQLException        => ZSQLException(e)
+                    }
                   }
   } yield count
 
   private def executeWithReturning[A](
     sql: SqlFragment,
     decoder: JdbcDecoder[A]
-  ): ZIO[Scope with ZConnection, Throwable, UpdateResult[A]] =
+  ): ZIO[Scope with ZConnection, QueryException, UpdateResult[A]] =
     for {
-      updateRes  <- executeUpdate(sql, true)
-      (count, rs) = updateRes
-      keys       <- ZIO
-                      .fromOption(rs)
-                      .flatMap(rs =>
-                        ZIO.attempt {
-                          val builder = ChunkBuilder.make[A]()
-                          while (rs.next())
-                            builder += decoder.unsafeDecode(1, rs.resultSet)._2
-                          builder.result()
-                        }
-                      )
-                      .orElseSucceed(Chunk.empty)
+      updateRes       <- executeUpdate(sql, true)
+      (count, maybeRs) = updateRes
+      keys            <- maybeRs match {
+                           case None     => ZIO.succeed(Chunk.empty)
+                           case Some(rs) =>
+                             ZIO.attempt {
+                               val builder = ChunkBuilder.make[A]()
+                               while (rs.next())
+                                 builder += decoder.unsafeDecode(1, rs.resultSet)._2
+                               builder.result()
+                             }.refineOrDie {
+                               case e: SQLTimeoutException => ZSQLTimeoutException(e)
+                               case e: SQLException        => ZSQLException(e)
+                             }
+                         }
     } yield UpdateResult(count, keys)
 
   private[jdbc] def executeUpdate(
     sql: SqlFragment,
     returnAutoGeneratedKeys: Boolean
-  ): ZIO[Scope with ZConnection, Throwable, (Long, Option[ZResultSet])] =
+  ): ZIO[Scope with ZConnection, QueryException, (Long, Option[ZResultSet])] =
     for {
       connection <- ZIO.service[ZConnection]
       result     <- connection.executeSqlWith(sql, returnAutoGeneratedKeys) { ps =>
-                      ZIO.acquireRelease(ZIO.attempt {
-                        val rowsUpdated = ps.executeLargeUpdate()
-                        val updatedKeys = if (returnAutoGeneratedKeys) Some(ps.getGeneratedKeys) else None
-                        (rowsUpdated, updatedKeys.map(ZResultSet(_)))
+                      ZIO
+                        .acquireRelease(ZIO.attempt {
+                          val rowsUpdated = ps.executeLargeUpdate()
+                          val updatedKeys = if (returnAutoGeneratedKeys) Some(ps.getGeneratedKeys) else None
+                          (rowsUpdated, updatedKeys.map(ZResultSet(_)))
 
-                      })(_._2.map(_.close).getOrElse(ZIO.unit))
-
+                        })(_._2.map(_.close).getOrElse(ZIO.unit))
+                        .refineOrDie {
+                          case e: SQLTimeoutException => ZSQLTimeoutException(e)
+                          case e: SQLException        => ZSQLException(e)
+                        }
                     }
     } yield result
 
