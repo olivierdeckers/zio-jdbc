@@ -18,7 +18,7 @@ package zio.jdbc
 import zio._
 
 import java.io._
-import java.time.{OffsetDateTime, OffsetTime}
+import java.time.{ OffsetDateTime, OffsetTime }
 import java.sql.{ Array => _, _ }
 import scala.collection.immutable.ListMap
 
