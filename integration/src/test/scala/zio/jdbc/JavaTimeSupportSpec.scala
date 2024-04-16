@@ -59,9 +59,11 @@ object JavaTimeSupportSpec extends PgSpec {
   val genPGLocalDate: Gen[Any, LocalDate]           = Gen.localDate(MIN_LOCAL_DATE, MAX_LOCAL_DATE)
   val genPGLocalTime: Gen[Any, LocalTime]           = Gen.localTime(LocalTime.MIN, MAX_TIME)
   val genPGLocalDateTime: Gen[Any, LocalDateTime]   = Gen.localDateTime(MIN_LOCAL_DATETIME, MAX_LOCAL_DATETIME)
-  // We need to set `UTC` as PG will move the date to UTC and so can generate a date that is not in the range of `MIN_TIMESTAMP` and `MAX_TIMESTAMP`
+  // We need to limit the offset range because postgres doesn't support offsets > +/-17:00
   val genPGOffsetDateTime: Gen[Any, OffsetDateTime] =
-    Gen.offsetDateTime(MIN_OFFSET_DATETIME, MAX_OFFSET_DATETIME).map(_.withOffsetSameInstant(ZoneOffset.UTC))
+    Gen
+      .offsetDateTime(MIN_OFFSET_DATETIME, MAX_OFFSET_DATETIME)
+      .filter(_.getOffset.getTotalSeconds.abs < 17 * 60)
   val genPGInstant: Gen[Any, Instant]               = Gen.instant(MIN_TIMESTAMP, MAX_TIMESTAMP)
 
   /**
