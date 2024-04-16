@@ -58,6 +58,28 @@ object DuckDbSpec extends ZIOSpec[ZConnection] {
           d.get.value == expected
         )
       }
+    },
+    test("should be able to decode OffsetDateTime values and handle timezones correctly") {
+      check(
+        Gen.offsetDateTime(
+          OffsetDateTime.of(1970, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
+          OffsetDateTime.of(2100, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC)
+        )
+      ) { offsetDateTime =>
+        for {
+          _       <- sql"""CREATE TABLE offset_datetime (value TIMESTAMP WITH TIME ZONE)""".execute
+          _       <- sql"""INSERT INTO offset_datetime VALUES ($offsetDateTime)""".execute
+          d       <- sql"""SELECT value FROM offset_datetime""".query[OffsetDateTime].selectOne
+          _       <- sql"DROP TABLE offset_datetime".execute
+          expected =
+            offsetDateTime
+              .truncatedTo(ChronoUnit.MICROS)
+              .withOffsetSameInstant(ZoneOffset.UTC)
+        } yield assertTrue(
+          d.isDefined,
+          d.get == expected
+        )
+      }
     }
   ) @@ sequential @@ shrinks(0) @@ repeats(100) @@ withLiveClock
 
